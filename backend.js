@@ -1,80 +1,106 @@
+;;;;;// Update imports
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const Web3 = require('web3');
-const contractABI = require('./contractABI.json');
+const { ethers } = require('ethers');
+const contractABI = require('./artifacts/contracts/Voting.sol/Voting.json').abi;
 const contractAddress = process.env.CONTRACT_ADDRESS;
 const Voter = require('./voterModel');
 
-// Initialize Express app
 const app = express();
 
-// Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI);
 const db = mongoose.connection;
 db.on('error', console.error.bind(console, 'MongoDB connection error:'));
 
-// Remove this duplicate schema definition
-// const voterSchema = new mongoose.Schema({
-//     address: { type: String, required: true, unique: true },
-//     isRegistered: { type: Boolean, default: false },
-//     hasVoted: { type: Boolean, default: false },
-// });
-// const VoterModel = mongoose.model('Voter', voterSchema);
-
-app.use(cors()); // Add CORS middleware
+app.use(cors());
 app.use(bodyParser.json());
 
-// Web3 setup
-const web3 = new Web3(new Web3.providers.HttpProvider('http://127.0.0.1:8545')); // Ganache default URL
+console.log('\n🔄 Server restarting...');
+console.log('=======================================');
 
-// Add your account's private key (from MetaMask)
+console.log('🚀 Starting Ethereum connection setup...');
+console.log('📡 Setting up provider for network:', 'http://127.0.0.1:8545');
+const provider = ethers.getDefaultProvider('http://127.0.0.1:8545');
+
+console.log('🔑 Initializing wallet...');
 const privateKey = process.env.METAMASK_ACCOUNT_PRIVATE_KEY;
-const account = web3.eth.accounts.privateKeyToAccount(privateKey);
-web3.eth.accounts.wallet.add(account);
-web3.eth.defaultAccount = account.address;
+console.log('Private key length:', privateKey?.length || 'undefined');
+const wallet = new ethers.Wallet(privateKey, provider);
 
-// Initialize default account with error handling
-const initializeWeb3 = async () => {
+console.log('📄 Setting up smart contract...');
+console.log('Contract address:', contractAddress);
+console.log('ABI loaded:', Boolean(contractABI));
+if (!contractABI) {
+    console.error('❌ Contract ABI is missing or invalid');
+    process.exit(1);
+}
+if (!contractAddress) {
+    console.error('❌ Contract address is missing');
+    process.exit(1);
+}
+const contract = new ethers.Contract(contractAddress, contractABI, wallet);
+
+const checkConnection = async () => {
     try {
-        console.log('Default account set:', web3.eth.defaultAccount);
-    } catch (error) {
-        console.error('Web3 initialization error:', error.message);
+        console.log('🔍 Checking network connection...');
+        const network = await provider.getNetwork();
+        console.log('Network details:', {
+            name: network.name,
+            chainId: network.chainId,
+            ensAddress: network.ensAddress
+        });
+        const balance = await provider.getBalance(wallet.address);
+        console.log('Wallet balance:', ethers.utils.formatEther(balance), 'ETH');
+        console.log('✅ Successfully connected to Ethereum network');
+    } catch (err) {
+        console.error('❌ Connection error details:');
+        console.error('Error name:', err.name);
+        console.error('Error message:', err.message);
+        console.error('Stack trace:', err.stack);
+        process.exit(1);
     }
 };
 
-initializeWeb3();
+const initialize = async () => {
+    try {
+        await checkConnection();
+        console.log('Default account set:', wallet.address);
+    } catch (error) {
+        console.error('Initialization error:', error.message);
+    }
+};
 
-const contract = new web3.eth.Contract(contractABI, contractAddress);
-
-// API endpoints
-const registeredAccountNumberHashes = new Set();
+initialize();
 
 app.post('/register', async (req, res) => {
-    const { username, accountNumberHash } = req.body;
+    const { username, accountNumber, constituency, signature } = req.body;
     try {
-        if (registeredAccountNumberHashes.has(accountNumberHash)) {
-            throw new Error('Account number hash is already registered');
+        if (!username || !accountNumber || !constituency || !signature) {
+            throw new Error('Username, account number, constituency, and signature are required');
         }
-        
-        // Check if the account number hash is already registered in the database
-        const existingVoter = await Voter.findOne({ accountNumberHash });
+
+        const formattedHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(accountNumber));
+
+        const existingVoter = await Voter.findOne({ accountNumberHash: formattedHash });
         if (existingVoter) {
             throw new Error('Account number hash is already registered');
         }
 
-        // Register the voter in the smart contract with gas parameters
-        const gasEstimate = await contract.methods.registerVoter().estimateGas({ from: web3.eth.defaultAccount });
-        await contract.methods.registerVoter().send({ 
-            from: web3.eth.defaultAccount,
-            gas: gasEstimate + 50000 // Adding buffer for safety
-        });
+        try {
+            const estimatedGas = await contract.estimateGas.registerVoter(constituency, formattedHash, signature);
+            const tx = await contract.registerVoter(constituency, formattedHash, signature, {
+                gasLimit: estimatedGas.add(3000)
+            });
+            await tx.wait();
+        } catch (err) {
+            console.error("🚨 Gas estimation or transaction failed:", err);
+            throw err;
+        }
 
-        // Save the voter details in the database
-        await new Voter({ username, accountNumberHash }).save();
-        registeredAccountNumberHashes.add(accountNumberHash);
+        await new Voter({ username, accountNumberHash: formattedHash, constituency }).save();
 
         res.json({ message: 'Voter registered successfully' });
     } catch (error) {
@@ -82,31 +108,30 @@ app.post('/register', async (req, res) => {
     }
 });
 
+// The rest of the code remains unchanged...
+// Update vote endpoint
 app.post('/vote', async (req, res) => {
     const { address, candidateName } = req.body;
     try {
-        if (!web3.utils.isAddress(address) || !candidateName) {
+        if (!ethers.utils.isAddress(address) || !candidateName) {
             throw new Error('Invalid address or candidate name');
         }
 
-        const voter = await VoterModel.findOne({ address });
-        if (!voter || !voter.isRegistered) {
+        const voter = await Voter.findOne({ address });
+        if (!voter) {
             throw new Error('Voter is not registered');
         }
 
-        if (voter.hasVoted) {
-            throw new Error('Voter has already voted');
-        }
-
-        const candidates = await contract.methods.getCandidateList().call();
+        const candidates = await contract.getCandidateList();
         if (!candidates.includes(candidateName)) {
             throw new Error('Candidate does not exist');
         }
 
-        await contract.methods.castVote(candidateName).send({ 
-            from: address,
-            gas: 3000000 // Added gas limit
+        const estimatedGas = await contract.estimateGas.castVote(candidateName);
+        const tx = await contract.castVote(candidateName, {
+            gasLimit: estimatedGas.mul(120).div(100)
         });
+        await tx.wait();
 
         voter.hasVoted = true;
         await voter.save();
@@ -117,75 +142,18 @@ app.post('/vote', async (req, res) => {
     }
 });
 
+// Update candidates endpoint
 app.get('/candidates', async (req, res) => {
     try {
-        console.log('Attempting to get candidates list...');
-        console.log('Contract address:', contractAddress);
-        console.log('Contract ABI:', JSON.stringify(contractABI, null, 2));
-        console.log('Default account:', web3.eth.defaultAccount);
-        
-        const candidates = await contract.methods.getCandidateList().call();
-        console.log('Candidates:', candidates);
+        const candidates = await contract.getCandidateList();
         res.json(candidates);
     } catch (error) {
         console.error('Detailed error:', error);
-        console.error('Contract state:', await web3.eth.getCode(contractAddress));
         res.status(400).json({ error: error.message });
     }
 });
 
-
-// Server setup
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
-
-// Documentation endpoint
-app.get('/', (req, res) => {
-    res.json({
-        endpoints: {
-            register: {
-                description: 'Register a voter',
-                method: 'POST',
-                path: '/register',
-                body: {
-                    username: 'String (Voter username)',
-                    accountNumberHash: 'String (Hashed account number)',
-                },
-            },
-            vote: {
-                description: 'Cast a vote',
-                method: 'POST',
-                path: '/vote',
-                body: {
-                    address: 'String (Ethereum address)',
-                    candidateName: 'String (Candidate name)',
-                },
-            },
-            candidates: {
-                description: 'Get the list of candidates',
-                method: 'GET',
-                path: '/candidates',
-            },
-            addCandidate: {
-                description: 'Register a new candidate',
-                method: 'POST',
-                path: '/add-candidate',
-                body: {
-                    candidateName: 'String (Candidate name)',
-                },
-            },
-            testContract: {
-                description: 'Test if the smart contract is deployed and accessible',
-                method: 'GET',
-                path: '/test-contract',
-            }
-        },
-    });
-});
-
-// Add this after your other endpoints
+// Update add-candidate endpoint
 app.post('/add-candidate', async (req, res) => {
     const { candidateName } = req.body;
     try {
@@ -193,15 +161,8 @@ app.post('/add-candidate', async (req, res) => {
             throw new Error('Candidate name is required');
         }
 
-        // Call the smart contract's addCandidate function
-        const gasEstimate = await contract.methods.addCandidate(candidateName).estimateGas({ 
-            from: web3.eth.defaultAccount 
-        });
-        
-        await contract.methods.addCandidate(candidateName).send({ 
-            from: web3.eth.defaultAccount,
-            gas: gasEstimate + 50000
-        });
+        const tx = await contract.addCandidate(candidateName);
+        await tx.wait();
 
         res.json({ message: `Candidate ${candidateName} registered successfully` });
     } catch (error) {
@@ -212,17 +173,68 @@ app.post('/add-candidate', async (req, res) => {
 
 app.get('/test-contract', async (req, res) => {
     try {
-        const isDeployed = await web3.eth.getCode(contractAddress);
-        if(isDeployed === '0x') {
+        const code = await provider.getCode(contractAddress);
+        if(code === '0x') {
             throw new Error('Contract not found at specified address');
         }
         res.json({ 
             status: 'Contract found',
             address: contractAddress,
-            bytecode: isDeployed
+            bytecode: code
         });
     } catch (error) {
         console.error('Contract test error:', error);
         res.status(400).json({ error: error.message });
     }
+});
+
+// Add this near your other endpoints
+app.get('/health', async (req, res) => {
+    try {
+        const network = await provider.getNetwork();
+        const balance = await provider.getBalance(wallet.address);
+        
+        res.json({ 
+            status: 'ok', 
+            timestamp: new Date().toISOString(),
+            ethereum: {
+                connected: true,
+                network: network.name,
+                chainId: network.chainId,
+                walletAddress: wallet.address,
+                balance: ethers.utils.formatEther(balance)
+            },
+            mongodb: {
+                connected: mongoose.connection.readyState === 1
+            },
+            contract: {
+                address: contractAddress,
+                deployed: Boolean(contractAddress)
+            }
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: 'error',
+            error: error.message
+        });
+    }
+});
+
+// Add graceful shutdown handlers
+process.on('SIGINT', () => {
+    console.log('\n🛑 Server shutting down...');
+    process.exit();
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n🛑 Server shutting down...');
+    process.exit();
+});
+
+// Add server listening
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🌐 Server is running on port ${PORT}`);
+    console.log(`📚 API Documentation: http://localhost:${PORT}`);
+    console.log('=======================================');
 });
