@@ -1,6 +1,9 @@
 [
     {
-        "inputs": [],
+        "inputs": [
+            {"name": "_constituency", "type": "string"},
+            {"name": "signature", "type": "bytes"}
+        ],
         "name": "registerVoter",
         "outputs": [],
         "stateMutability": "nonpayable",
@@ -21,10 +24,55 @@
         "type": "function"
     },
     {
-        "inputs": [{"name": "candidateName", "type": "string"}],
+        "inputs": [{"name": "_name", "type": "string"}],
         "name": "addCandidate",
         "outputs": [],
         "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"name": "voter", "type": "address"},
+            {"name": "_constituency", "type": "string"}
+        ],
+        "name": "getMessageHash",
+        "outputs": [{"name": "", "type": "bytes32"}],
+        "stateMutability": "pure",
+        "type": "function"
+    },
+    {
+        "inputs": [{"name": "messageHash", "type": "bytes32"}],
+        "name": "getEthSignedMessageHash",
+        "outputs": [{"name": "", "type": "bytes32"}],
+        "stateMutability": "pure",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"name": "_ethSignedMessageHash", "type": "bytes32"},
+            {"name": "_signature", "type": "bytes"}
+        ],
+        "name": "recoverSigner",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "pure",
+        "type": "function"
+    },
+    {
+        "inputs": [{"name": "sig", "type": "bytes"}],
+        "name": "splitSignature",
+        "outputs": [
+            {"name": "r", "type": "bytes32"},
+            {"name": "s", "type": "bytes32"},
+            {"name": "v", "type": "uint8"}
+        ],
+        "stateMutability": "pure",
+        "type": "function"
+    },
+    {
+        "inputs": [{"name": "_candidateName", "type": "string"}],
+        "name": "totalVotesFor",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
         "type": "function"
     }
 ]
